@@ -1,41 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { X, Send, Trash2, Bot, Loader2, Image as ImageIcon } from 'lucide-react'
 import { HfInference } from '@huggingface/inference'
 
 const STORAGE_KEY = 'iss-chat-history'
 const MAX_MESSAGES = 30
 const HF_TOKEN = import.meta.env.VITE_AI_TOKEN
-
-// Using a more reliable model for the free Inference API that supports Chat Completion
-const MODEL = 'microsoft/Phi-3-mini-4k-instruct'
-const IMG_MODEL = 'stabilityai/stable-diffusion-xl-base-1.0'
-
 const hf = new HfInference(HF_TOKEN)
-
-function buildSystemPrompt(context) {
-  const { issData, issSpeed, astronauts, newsData } = context
-
-  const issInfo = issData
-    ? `Current ISS Position: Lat ${issData.lat.toFixed(2)}°, Lon ${issData.lon.toFixed(2)}°. Speed: ${issSpeed?.toLocaleString()} km/h.`
-    : 'ISS data loading...'
-
-  const astroInfo = astronauts?.number 
-    ? `People in space: ${astronauts.number}.`
-    : ''
-
-  const newsInfo = newsData && Object.keys(newsData).length > 0
-    ? 'Recent news topics: ' + Object.keys(newsData).join(', ')
-    : 'News loading...'
-
-  return `You are an ISS Dashboard AI. Answer ONLY based on this data:
-ISS: ${issInfo}
-Space: ${astroInfo}
-News: ${newsInfo}
-Rules:
-1. Be very concise.
-2. If asked for an image, the generator will handle it.
-3. If data is missing, say you don't know.`
-}
 
 export default function Chatbot({ context }) {
   const [open, setOpen] = useState(false)
@@ -45,7 +15,7 @@ export default function Chatbot({ context }) {
       return saved ? JSON.parse(saved) : [{
         id: 1,
         role: 'bot',
-        content: "Hello! I can answer questions about the ISS and News, or generate space images!",
+        content: "Hi! I'm your ISS assistant. Ask me about the ISS, news, or generate a space image!",
         timestamp: Date.now(),
       }]
     } catch { return [] }
@@ -65,7 +35,7 @@ export default function Chatbot({ context }) {
   const generateImage = async (prompt) => {
     try {
       const blob = await hf.textToImage({
-        model: IMG_MODEL,
+        model: "stabilityai/stable-diffusion-xl-base-1.0",
         inputs: prompt,
         parameters: { num_inference_steps: 25 },
       })
@@ -79,16 +49,16 @@ export default function Chatbot({ context }) {
   const sendMessage = async () => {
     if (!input.trim() || loading) return
 
-    const userMsg = { id: Date.now(), role: 'user', content: input.trim(), timestamp: Date.now() }
+    const userMessage = input.trim()
+    const userMsg = { id: Date.now(), role: 'user', content: userMessage, timestamp: Date.now() }
     setMessages(prev => [...prev, userMsg])
     setInput('')
     setLoading(true)
 
     try {
-      const isImageRequest = /image|picture|draw|generate/i.test(userMsg.content)
-      
-      if (isImageRequest) {
-        const imageUrl = await generateImage(userMsg.content)
+      // Check for image generation request
+      if (/image|picture|draw|generate/i.test(userMessage)) {
+        const imageUrl = await generateImage(userMessage)
         if (imageUrl) {
           setMessages(prev => [...prev, {
             id: Date.now() + 1,
@@ -102,19 +72,49 @@ export default function Chatbot({ context }) {
         }
       }
 
-      // Use chatCompletion for models that support conversational task
-      const response = await hf.chatCompletion({
-        model: MODEL,
-        messages: [
-          { role: 'system', content: buildSystemPrompt(context) },
-          ...messages.slice(-5).map(m => ({ role: m.role === 'bot' ? 'assistant' : 'user', content: m.content })),
-          { role: 'user', content: userMsg.content }
-        ],
-        max_tokens: 200,
-        temperature: 0.7,
-      })
+      // Format Dashboard Data for the prompt
+      const dashboardInfo = `
+        ISS Position: Lat ${context.issData?.lat?.toFixed(4) || '---'}, Lon ${context.issData?.lon?.toFixed(4) || '---'}
+        ISS Speed: ${context.issSpeed?.toLocaleString() || '---'} km/h
+        People in Space: ${context.astronauts?.number || '---'}
+        News Categories: ${Object.keys(context.newsData || {}).join(', ')}
+      `
 
-      const reply = response.choices[0].message.content
+      // Use the OpenAI-compatible endpoint as requested
+      const response = await fetch(
+        "https://router.huggingface.co/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${HF_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "mistralai/Mistral-7B-Instruct-v0.2",
+            messages: [
+              {
+                role: "system",
+                content: `
+                  You are an ISS Dashboard Assistant.
+                  IMPORTANT RULES:
+                  - ONLY answer from provided dashboard data
+                  - If data not available say: "I only answer using dashboard data."
+                  Dashboard Data: ${dashboardInfo}
+                `,
+              },
+              {
+                role: "user",
+                content: userMessage,
+              },
+            ],
+            max_tokens: 200,
+            temperature: 0.5,
+          }),
+        }
+      );
+
+      const data = await response.json();
+      const reply = data.choices?.[0]?.message?.content || "I only answer using dashboard data.";
       
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
@@ -126,7 +126,7 @@ export default function Chatbot({ context }) {
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
         role: 'bot',
-        content: `⚠️ Assistant Error: ${err.message}. Please verify your API Token.`,
+        content: `⚠️ Error: ${err.message}. Please check your AI Token.`,
         timestamp: Date.now()
       }])
     } finally {
